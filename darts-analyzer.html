@@ -425,7 +425,7 @@
 <div class="app">
   <header>
     <div>
-      <div class="tag">Pose Kinematics // v0.4</div>
+      <div class="tag">Pose Kinematics // v0.5</div>
       <h1 class="brand">OCHE<span>.</span></h1>
       <div class="tag" style="margin-top:4px">Darts motion lab — seitliche analyse</div>
     </div>
@@ -820,16 +820,18 @@ function processPose(result, now) {
   const vis = (p) => (typeof p.visibility === 'number' ? p.visibility : 1);
   const armVisible = vis(sho) >= VIS_MIN && vis(elb) >= VIS_MIN && vis(wri) >= VIS_MIN;
 
-  // Body scale (px). Prefer ipsilateral shoulder→hip; fall back to shoulder-to-shoulder × 1.5
-  // (works in side-view when the far hip is occluded). Smoothed across frames.
+  // Body scale (px). Try ipsilateral shoulder→hip first; fall back to shoulder-to-shoulder × 1.5.
+  // In side view MediaPipe often returns low visibility for the far joints even when usable,
+  // so we don't gate on visibility here — any sample > 20 px contributes.
   let scaleSample = null;
-  if (hip && vis(hip) >= VIS_MIN) {
+  if (hip) {
     scaleSample = Math.hypot((sho.x - hip.x) * overlay.width, (sho.y - hip.y) * overlay.height);
-  } else {
+  }
+  if (!scaleSample || scaleSample < 20) {
     const otherSho = lms[state.side === 'right' ? LM.L_SHOULDER : LM.R_SHOULDER];
-    if (otherSho && vis(otherSho) >= VIS_MIN) {
+    if (otherSho) {
       const shoSpan = Math.hypot((sho.x - otherSho.x) * overlay.width, (sho.y - otherSho.y) * overlay.height);
-      scaleSample = shoSpan * 1.5; // shoulder span ≈ 2/3 torso height
+      if (shoSpan > 15) scaleSample = shoSpan * 1.5;
     }
   }
   if (scaleSample && scaleSample > 20) {
@@ -874,8 +876,8 @@ function processPose(result, now) {
   }
   drawAngleChart();
 
-  // Phase detection (only meaningful when recording AND arm reliably visible)
-  if (state.recording && elbAng != null && armVisible) {
+  // Phase detection (only meaningful when recording)
+  if (state.recording && elbAng != null) {
     const frame = { t: now, sho, elb, wri, elbAng, shoAng, speed };
     state.frames.push(frame);
     state.speedHistory.push(speed);
@@ -900,19 +902,17 @@ const MIN_ELBOW_DELTA = 15;   // elbow must extend by ≥ 15° during the throw
 function detectPhase(now, elbAng, speed) {
   const avgSpeed = mean(state.speedHistory);
   const prev = state.phase;
-  const torso = state.torso || 100;
+  // Body scale falls back to 150 px (typical webcam framing) so detection never freezes.
+  const torso = state.torso || 150;
   const peakThresh = torso * REL.SPEED_PEAK;
   const riseThresh = torso * REL.SPEED_RISE;
   const lowThresh  = torso * REL.SPEED_LOW;
 
   if (state.phase === 'idle') {
-    // Cooldown after a recent release blocks immediate retrigger
     if (now - state.lastThrowEnd < COOLDOWN_MS) {
       if (prev !== state.phase) updatePhaseBanner(state.phase);
       return;
     }
-    // Require known body scale before we trust speed thresholds
-    if (!state.torso) return;
     if (avgSpeed > riseThresh) {
       state.phase = 'forward';
       state.phaseSince = now;
