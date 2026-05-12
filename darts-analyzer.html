@@ -425,7 +425,7 @@
 <div class="app">
   <header>
     <div>
-      <div class="tag">Pose Kinematics // v0.3</div>
+      <div class="tag">Pose Kinematics // v0.4</div>
       <h1 class="brand">OCHE<span>.</span></h1>
       <div class="tag" style="margin-top:4px">Darts motion lab — seitliche analyse</div>
     </div>
@@ -454,6 +454,9 @@
           <div>Ellbogen: <span class="v" id="liveElbow">—</span>°</div>
           <div>Schulter: <span class="v" id="liveShoulder">—</span>°</div>
           <div>Hand v: <span class="v" id="liveSpeed">—</span></div>
+          <div style="margin-top:6px;border-top:1px solid rgba(244,240,232,0.15);padding-top:6px;font-size:10px;color:var(--ink-dim)">
+            torso: <span id="dbgTorso">—</span>px · phase: <span id="dbgPhase">idle</span>
+          </div>
         </div>
       </div>
       <div class="controls">
@@ -813,14 +816,24 @@ function processPose(result, now) {
   if (!sho || !elb || !wri) return;
 
   // Visibility check — MediaPipe provides this per landmark. Skip frames where any key joint is unreliable.
-  const VIS_MIN = 0.5;
+  const VIS_MIN = 0.3;
   const vis = (p) => (typeof p.visibility === 'number' ? p.visibility : 1);
   const armVisible = vis(sho) >= VIS_MIN && vis(elb) >= VIS_MIN && vis(wri) >= VIS_MIN;
 
-  // Body scale: torso length (shoulder→hip) in pixels — used to normalize speed thresholds
+  // Body scale (px). Prefer ipsilateral shoulder→hip; fall back to shoulder-to-shoulder × 1.5
+  // (works in side-view when the far hip is occluded). Smoothed across frames.
+  let scaleSample = null;
   if (hip && vis(hip) >= VIS_MIN) {
-    const t = Math.hypot((sho.x - hip.x) * overlay.width, (sho.y - hip.y) * overlay.height);
-    state.torso = state.torso ? state.torso * 0.9 + t * 0.1 : t;
+    scaleSample = Math.hypot((sho.x - hip.x) * overlay.width, (sho.y - hip.y) * overlay.height);
+  } else {
+    const otherSho = lms[state.side === 'right' ? LM.L_SHOULDER : LM.R_SHOULDER];
+    if (otherSho && vis(otherSho) >= VIS_MIN) {
+      const shoSpan = Math.hypot((sho.x - otherSho.x) * overlay.width, (sho.y - otherSho.y) * overlay.height);
+      scaleSample = shoSpan * 1.5; // shoulder span ≈ 2/3 torso height
+    }
+  }
+  if (scaleSample && scaleSample > 20) {
+    state.torso = state.torso ? state.torso * 0.85 + scaleSample * 0.15 : scaleSample;
   }
 
   // Elbow angle (sho-elb-wri)
@@ -849,6 +862,10 @@ function processPose(result, now) {
   liveElbow.textContent = elbAng ? elbAng.toFixed(0) : '—';
   liveShoulder.textContent = shoAng ? shoAng.toFixed(0) : '—';
   liveSpeed.textContent = (speed / 1000).toFixed(2) + ' k';
+  const dbgTorso = document.getElementById('dbgTorso');
+  const dbgPhase = document.getElementById('dbgPhase');
+  if (dbgTorso) dbgTorso.textContent = state.torso ? state.torso.toFixed(0) : '—';
+  if (dbgPhase) dbgPhase.textContent = state.recording ? state.phase : 'not rec';
 
   // Update rolling chart history
   if (elbAng != null) {
@@ -871,14 +888,14 @@ function processPose(result, now) {
 // Thresholds are scaled by torso length (px) so they're independent of camera distance / resolution.
 // Units: "torso lengths per second" (TLPS).
 const REL = {
-  SPEED_LOW:  0.5,   // ≈ "at rest"
-  SPEED_RISE: 2.0,   // active motion start
-  SPEED_PEAK: 5.0,   // minimum required peak for a valid throw
+  SPEED_LOW:  0.4,
+  SPEED_RISE: 1.5,
+  SPEED_PEAK: 3.5,   // minimum required peak (torso-lengths/s) for a valid throw
 };
-const COOLDOWN_MS = 1000;     // min time between two consecutive releases
-const MIN_THROW_MS = 200;     // forward phase must last at least this long
-const MIN_FWD_TRAVEL = 0.5;   // wrist must travel ≥ 0.5 torso lengths in throw direction
-const MIN_ELBOW_DELTA = 25;   // elbow must extend by ≥ 25° during the throw
+const COOLDOWN_MS = 800;
+const MIN_THROW_MS = 150;
+const MIN_FWD_TRAVEL = 0.3;   // wrist must travel ≥ 0.3 torso lengths
+const MIN_ELBOW_DELTA = 15;   // elbow must extend by ≥ 15° during the throw
 
 function detectPhase(now, elbAng, speed) {
   const avgSpeed = mean(state.speedHistory);
