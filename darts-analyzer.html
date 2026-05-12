@@ -425,7 +425,7 @@
 <div class="app">
   <header>
     <div>
-      <div class="tag">Pose Kinematics // v0.5</div>
+      <div class="tag">Pose Kinematics // v0.6</div>
       <h1 class="brand">OCHE<span>.</span></h1>
       <div class="tag" style="margin-top:4px">Darts motion lab — seitliche analyse</div>
     </div>
@@ -894,10 +894,11 @@ const REL = {
   SPEED_RISE: 1.5,
   SPEED_PEAK: 3.5,   // minimum required peak (torso-lengths/s) for a valid throw
 };
-const COOLDOWN_MS = 800;
+const COOLDOWN_MS = 600;
 const MIN_THROW_MS = 150;
-const MIN_FWD_TRAVEL = 0.3;   // wrist must travel ≥ 0.3 torso lengths
-const MIN_ELBOW_DELTA = 15;   // elbow must extend by ≥ 15° during the throw
+const MIN_FWD_TRAVEL = 0.3;
+const MIN_ELBOW_DELTA = 15;
+const MIN_RELEASE_ANGLE = 100;  // elbow must be reasonably extended at the speed peak
 
 function detectPhase(now, elbAng, speed) {
   const avgSpeed = mean(state.speedHistory);
@@ -935,7 +936,8 @@ function detectPhase(now, elbAng, speed) {
         : 0;
       // Elbow must actually extend during the throw — filters static-arm noise spikes
       const dAng = segStart && segPeak ? Math.abs(segPeak.elbAng - segStart.elbAng) : 0;
-      if (duration < MIN_THROW_MS || dx < MIN_FWD_TRAVEL || dAng < MIN_ELBOW_DELTA) {
+      const releaseAng = segPeak ? segPeak.elbAng : 0;
+      if (duration < MIN_THROW_MS || dx < MIN_FWD_TRAVEL || dAng < MIN_ELBOW_DELTA || releaseAng < MIN_RELEASE_ANGLE) {
         // false positive — discard and cool down briefly
         state.phase = 'idle';
         state.lastThrowEnd = now;
