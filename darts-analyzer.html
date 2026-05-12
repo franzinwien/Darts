@@ -425,7 +425,7 @@
 <div class="app">
   <header>
     <div>
-      <div class="tag">Pose Kinematics // v0.1</div>
+      <div class="tag">Pose Kinematics // v0.4</div>
       <h1 class="brand">OCHE<span>.</span></h1>
       <div class="tag" style="margin-top:4px">Darts motion lab — seitliche analyse</div>
     </div>
@@ -454,6 +454,9 @@
           <div>Ellbogen: <span class="v" id="liveElbow">—</span>°</div>
           <div>Schulter: <span class="v" id="liveShoulder">—</span>°</div>
           <div>Hand v: <span class="v" id="liveSpeed">—</span></div>
+          <div style="margin-top:6px;border-top:1px solid rgba(244,240,232,0.15);padding-top:6px;font-size:10px;color:var(--ink-dim)">
+            torso: <span id="dbgTorso">—</span>px · phase: <span id="dbgPhase">idle</span>
+          </div>
         </div>
       </div>
       <div class="controls">
@@ -812,10 +815,25 @@ function processPose(result, now) {
   const sho = lms[idx.sho], elb = lms[idx.elb], wri = lms[idx.wri], hip = lms[idx.hip];
   if (!sho || !elb || !wri) return;
 
-  // Body scale: torso length (shoulder→hip) in pixels — used to normalize speed thresholds
-  if (hip) {
-    const t = Math.hypot((sho.x - hip.x) * overlay.width, (sho.y - hip.y) * overlay.height);
-    state.torso = state.torso ? state.torso * 0.9 + t * 0.1 : t;
+  // Visibility check — MediaPipe provides this per landmark. Skip frames where any key joint is unreliable.
+  const VIS_MIN = 0.3;
+  const vis = (p) => (typeof p.visibility === 'number' ? p.visibility : 1);
+  const armVisible = vis(sho) >= VIS_MIN && vis(elb) >= VIS_MIN && vis(wri) >= VIS_MIN;
+
+  // Body scale (px). Prefer ipsilateral shoulder→hip; fall back to shoulder-to-shoulder × 1.5
+  // (works in side-view when the far hip is occluded). Smoothed across frames.
+  let scaleSample = null;
+  if (hip && vis(hip) >= VIS_MIN) {
+    scaleSample = Math.hypot((sho.x - hip.x) * overlay.width, (sho.y - hip.y) * overlay.height);
+  } else {
+    const otherSho = lms[state.side === 'right' ? LM.L_SHOULDER : LM.R_SHOULDER];
+    if (otherSho && vis(otherSho) >= VIS_MIN) {
+      const shoSpan = Math.hypot((sho.x - otherSho.x) * overlay.width, (sho.y - otherSho.y) * overlay.height);
+      scaleSample = shoSpan * 1.5; // shoulder span ≈ 2/3 torso height
+    }
+  }
+  if (scaleSample && scaleSample > 20) {
+    state.torso = state.torso ? state.torso * 0.85 + scaleSample * 0.15 : scaleSample;
   }
 
   // Elbow angle (sho-elb-wri)
@@ -844,6 +862,10 @@ function processPose(result, now) {
   liveElbow.textContent = elbAng ? elbAng.toFixed(0) : '—';
   liveShoulder.textContent = shoAng ? shoAng.toFixed(0) : '—';
   liveSpeed.textContent = (speed / 1000).toFixed(2) + ' k';
+  const dbgTorso = document.getElementById('dbgTorso');
+  const dbgPhase = document.getElementById('dbgPhase');
+  if (dbgTorso) dbgTorso.textContent = state.torso ? state.torso.toFixed(0) : '—';
+  if (dbgPhase) dbgPhase.textContent = state.recording ? state.phase : 'not rec';
 
   // Update rolling chart history
   if (elbAng != null) {
@@ -852,8 +874,8 @@ function processPose(result, now) {
   }
   drawAngleChart();
 
-  // Phase detection (only meaningful when recording)
-  if (state.recording && elbAng != null) {
+  // Phase detection (only meaningful when recording AND arm reliably visible)
+  if (state.recording && elbAng != null && armVisible) {
     const frame = { t: now, sho, elb, wri, elbAng, shoAng, speed };
     state.frames.push(frame);
     state.speedHistory.push(speed);
@@ -866,13 +888,14 @@ function processPose(result, now) {
 // Thresholds are scaled by torso length (px) so they're independent of camera distance / resolution.
 // Units: "torso lengths per second" (TLPS).
 const REL = {
-  SPEED_LOW:  0.5,   // ≈ "at rest"
-  SPEED_RISE: 2.0,   // active motion start
-  SPEED_PEAK: 5.0,   // minimum required peak for a valid throw
+  SPEED_LOW:  0.4,
+  SPEED_RISE: 1.5,
+  SPEED_PEAK: 3.5,   // minimum required peak (torso-lengths/s) for a valid throw
 };
-const COOLDOWN_MS = 800;   // min time between two consecutive releases
-const MIN_THROW_MS = 150;  // forward phase must last at least this long
-const MIN_FWD_TRAVEL = 0.4; // wrist must travel ≥ 0.4 torso lengths in throw direction
+const COOLDOWN_MS = 800;
+const MIN_THROW_MS = 150;
+const MIN_FWD_TRAVEL = 0.3;   // wrist must travel ≥ 0.3 torso lengths
+const MIN_ELBOW_DELTA = 15;   // elbow must extend by ≥ 15° during the throw
 
 function detectPhase(now, elbAng, speed) {
   const avgSpeed = mean(state.speedHistory);
@@ -888,6 +911,8 @@ function detectPhase(now, elbAng, speed) {
       if (prev !== state.phase) updatePhaseBanner(state.phase);
       return;
     }
+    // Require known body scale before we trust speed thresholds
+    if (!state.torso) return;
     if (avgSpeed > riseThresh) {
       state.phase = 'forward';
       state.phaseSince = now;
@@ -908,7 +933,9 @@ function detectPhase(now, elbAng, speed) {
       const dx = segStart && segPeak
         ? Math.abs((segPeak.wri.x - segStart.wri.x) * overlay.width) / torso
         : 0;
-      if (duration < MIN_THROW_MS || dx < MIN_FWD_TRAVEL) {
+      // Elbow must actually extend during the throw — filters static-arm noise spikes
+      const dAng = segStart && segPeak ? Math.abs(segPeak.elbAng - segStart.elbAng) : 0;
+      if (duration < MIN_THROW_MS || dx < MIN_FWD_TRAVEL || dAng < MIN_ELBOW_DELTA) {
         // false positive — discard and cool down briefly
         state.phase = 'idle';
         state.lastThrowEnd = now;
@@ -1124,14 +1151,16 @@ function updateThrowsList() {
     </div>`;
   });
   throwsList.innerHTML = html;
-  throwsList.querySelectorAll('.throw-item.clickable').forEach(el => {
-    el.addEventListener('click', () => {
-      const n = parseInt(el.dataset.throwN, 10);
-      const thr = state.throws.find(x => x.n === n);
-      if (thr) showThrowDetail(thr);
-    });
-  });
 }
+
+// Single delegated click handler on the throws list — survives innerHTML rebuilds.
+throwsList.addEventListener('click', (e) => {
+  const item = e.target.closest('.throw-item.clickable');
+  if (!item) return;
+  const n = parseInt(item.dataset.throwN, 10);
+  const thr = state.throws.find(x => x.n === n);
+  if (thr) showThrowDetail(thr);
+});
 
 // ====== THROW DETAIL VIEW ======
 const throwDetail = document.getElementById('throwDetail');
