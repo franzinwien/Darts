@@ -350,6 +350,75 @@
     border-color: var(--accent);
     color: var(--bg);
   }
+
+  .throw-item.clickable { cursor: pointer; transition: background 0.1s; }
+  .throw-item.clickable:hover { background: rgba(244,240,232,0.04); }
+  .throw-item.clickable.active { background: rgba(230,57,70,0.08); }
+
+  .throw-detail {
+    position: fixed;
+    inset: 0;
+    background: rgba(10,10,10,0.85);
+    backdrop-filter: blur(6px);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 200;
+    padding: 20px;
+  }
+  .throw-detail.show { display: flex; }
+  .throw-detail-panel {
+    background: var(--bg-2);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    max-width: 720px;
+    width: 100%;
+    max-height: 90vh;
+    overflow-y: auto;
+  }
+  .throw-detail-head {
+    padding: 14px 18px;
+    border-bottom: 1px solid var(--line);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.25em;
+    color: var(--ink-dim);
+  }
+  .throw-detail-head .title { color: var(--accent); }
+  .throw-detail-close {
+    background: transparent;
+    border: 1px solid var(--line);
+    color: var(--ink);
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    cursor: pointer;
+    border-radius: 2px;
+    font-size: 14px;
+  }
+  .throw-detail-close:hover { border-color: var(--accent); color: var(--accent); }
+  .throw-detail-stats {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 1px;
+    background: var(--line);
+  }
+  .throw-detail-stats .metric { padding: 12px; }
+  .throw-detail-stats .value { font-size: 22px; }
+  .traj-wrap { padding: 16px; }
+  .traj-wrap canvas { width: 100%; display: block; background: #000; border: 1px solid var(--line); border-radius: 2px; }
+  .traj-legend {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 8px;
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.2em;
+    color: var(--ink-dim);
+  }
 </style>
 </head>
 <body>
@@ -407,6 +476,7 @@
             <li><strong>Wurf:</strong> Klick <em>Aufnahme</em> und wirf normal. App erkennt Wurfphasen (Backswing → Forward → Release) automatisch.</li>
             <li><strong>Analyse:</strong> Nach jedem Wurf werden Ellbogen-Stabilität, Release-Winkel, Hand-Geschwindigkeit und Wurf-zu-Wurf-Konsistenz berechnet.</li>
             <li><strong>Tipp:</strong> Aufnahme-Modus läuft kontinuierlich — wirf mehrere Pfeile hintereinander für Konsistenz-Score.</li>
+            <li><strong>Detail:</strong> Klick auf einen Wurf im Log öffnet die Trajektorie mit markiertem Release-Punkt.</li>
           </ol>
         </div>
       </details>
@@ -468,6 +538,40 @@
 
 <div class="toast" id="toast">—</div>
 
+<div class="throw-detail" id="throwDetail">
+  <div class="throw-detail-panel">
+    <div class="throw-detail-head">
+      <span class="title" id="detailTitle">Wurf #—</span>
+      <button class="throw-detail-close" id="detailClose">✕</button>
+    </div>
+    <div class="throw-detail-stats">
+      <div class="metric">
+        <div class="label">Release</div>
+        <div class="value"><span id="detailRelease">—</span><span class="unit">°</span></div>
+      </div>
+      <div class="metric">
+        <div class="label">Peak v</div>
+        <div class="value"><span id="detailSpeed">—</span><span class="unit">u/s</span></div>
+      </div>
+      <div class="metric">
+        <div class="label">Drift</div>
+        <div class="value"><span id="detailDrift">—</span><span class="unit">px</span></div>
+      </div>
+      <div class="metric">
+        <div class="label">Dauer</div>
+        <div class="value"><span id="detailDuration">—</span><span class="unit">s</span></div>
+      </div>
+    </div>
+    <div class="traj-wrap">
+      <canvas id="trajCanvas" width="680" height="380"></canvas>
+      <div class="traj-legend">
+        <span><b>○</b> Schulter &nbsp; <b>●</b> Ellbogen &nbsp; <b>▲</b> Handgelenk</span>
+        <span>Verlauf: hell → dunkel · Release-Punkt markiert</span>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script type="module">
 import { PoseLandmarker, FilesetResolver, DrawingUtils } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
 
@@ -493,6 +597,9 @@ const state = {
   speedHistory: [],
   angleHistory: [], // for live chart (rolling)
   maxHistory: 240, // ~8s at 30fps
+  torso: 0,            // smoothed torso length in px (shoulder→hip, tracked side)
+  lastThrowEnd: 0,     // timestamp of last release for cooldown
+  selectedThrow: null, // throw object currently shown in detail modal
 };
 
 // Landmarks indices (MediaPipe pose 33-point)
@@ -705,6 +812,12 @@ function processPose(result, now) {
   const sho = lms[idx.sho], elb = lms[idx.elb], wri = lms[idx.wri], hip = lms[idx.hip];
   if (!sho || !elb || !wri) return;
 
+  // Body scale: torso length (shoulder→hip) in pixels — used to normalize speed thresholds
+  if (hip) {
+    const t = Math.hypot((sho.x - hip.x) * overlay.width, (sho.y - hip.y) * overlay.height);
+    state.torso = state.torso ? state.torso * 0.9 + t * 0.1 : t;
+  }
+
   // Elbow angle (sho-elb-wri)
   const elbAng = angleBetween(sho, elb, wri);
   // Shoulder angle (hip-sho-elb)
@@ -750,24 +863,32 @@ function processPose(result, now) {
 }
 
 // ====== PHASE STATE MACHINE ======
-// Simplified darts throw phase detection based on wrist-speed and elbow-angle dynamics:
-//   idle      → backswing  : wrist moves backward (toward body), elbow flexing (angle decreases)
-//   backswing → forward    : wrist starts moving forward, speed rising
-//   forward   → release    : speed peaks then drops sharply
-//   release   → follow     : speed low again, elbow extending
-//   follow    → idle       : returns to rest
-//
-// We use speed thresholds + a windowed peak detector.
-const SPEED_LOW = 80;     // px/s - "at rest" threshold
-const SPEED_RISE = 250;   // px/s - active motion
-const SPEED_PEAK = 500;   // px/s - throw activity
+// Thresholds are scaled by torso length (px) so they're independent of camera distance / resolution.
+// Units: "torso lengths per second" (TLPS).
+const REL = {
+  SPEED_LOW:  0.5,   // ≈ "at rest"
+  SPEED_RISE: 2.0,   // active motion start
+  SPEED_PEAK: 5.0,   // minimum required peak for a valid throw
+};
+const COOLDOWN_MS = 800;   // min time between two consecutive releases
+const MIN_THROW_MS = 150;  // forward phase must last at least this long
+const MIN_FWD_TRAVEL = 0.4; // wrist must travel ≥ 0.4 torso lengths in throw direction
 
 function detectPhase(now, elbAng, speed) {
   const avgSpeed = mean(state.speedHistory);
   const prev = state.phase;
+  const torso = state.torso || 100;
+  const peakThresh = torso * REL.SPEED_PEAK;
+  const riseThresh = torso * REL.SPEED_RISE;
+  const lowThresh  = torso * REL.SPEED_LOW;
 
   if (state.phase === 'idle') {
-    if (avgSpeed > SPEED_RISE) {
+    // Cooldown after a recent release blocks immediate retrigger
+    if (now - state.lastThrowEnd < COOLDOWN_MS) {
+      if (prev !== state.phase) updatePhaseBanner(state.phase);
+      return;
+    }
+    if (avgSpeed > riseThresh) {
       state.phase = 'forward';
       state.phaseSince = now;
       state._throwStart = state.frames.length - 1;
@@ -779,20 +900,31 @@ function detectPhase(now, elbAng, speed) {
       state._peakSpeed = speed;
       state._peakIdx = state.frames.length - 1;
     }
-    // Release detected: speed has dropped to <60% of peak after exceeding threshold
-    if (state._peakSpeed > SPEED_PEAK && avgSpeed < state._peakSpeed * 0.5) {
-      state.phase = 'release';
-      state.phaseSince = now;
-      // record throw
-      finalizeThrow();
+    if (state._peakSpeed > peakThresh && avgSpeed < state._peakSpeed * 0.45) {
+      const duration = now - state.phaseSince;
+      // Validate: long enough + actual forward travel of the wrist (in image x)
+      const segStart = state.frames[state._throwStart];
+      const segPeak = state.frames[state._peakIdx];
+      const dx = segStart && segPeak
+        ? Math.abs((segPeak.wri.x - segStart.wri.x) * overlay.width) / torso
+        : 0;
+      if (duration < MIN_THROW_MS || dx < MIN_FWD_TRAVEL) {
+        // false positive — discard and cool down briefly
+        state.phase = 'idle';
+        state.lastThrowEnd = now;
+      } else {
+        state.phase = 'release';
+        state.phaseSince = now;
+        state.lastThrowEnd = now;
+        finalizeThrow();
+      }
     } else if (now - state.phaseSince > 2500) {
-      // timeout — no real throw
       state.phase = 'idle';
     }
   } else if (state.phase === 'release') {
     if (now - state.phaseSince > 600) state.phase = 'follow';
   } else if (state.phase === 'follow') {
-    if (avgSpeed < SPEED_LOW && now - state.phaseSince > 400) state.phase = 'idle';
+    if (avgSpeed < lowThresh && now - state.phaseSince > 400) state.phase = 'idle';
   }
 
   if (prev !== state.phase) updatePhaseBanner(state.phase);
@@ -837,6 +969,18 @@ function finalizeThrow() {
 
   const duration = (releaseFrame.t - state.frames[start].t) / 1000;
 
+  // Snapshot trajectory: normalized joint coords + elbow angle per frame in the throw segment.
+  // Stored as plain values (not landmark refs) so it survives later mutations.
+  const trajectory = segment.map(f => ({
+    t: f.t,
+    sho: { x: f.sho.x, y: f.sho.y },
+    elb: { x: f.elb.x, y: f.elb.y },
+    wri: { x: f.wri.x, y: f.wri.y },
+    elbAng: f.elbAng,
+    speed: f.speed,
+  }));
+  const releaseIdxInSeg = Math.min(trajectory.length - 1, peakIdx - start);
+
   const throwData = {
     n: state.throws.length + 1,
     releaseAngle,
@@ -844,6 +988,8 @@ function finalizeThrow() {
     elbowDrift,
     duration,
     timestamp: new Date(),
+    trajectory,
+    releaseIdx: releaseIdxInSeg,
   };
   state.throws.push(throwData);
 
@@ -969,7 +1115,7 @@ function updateThrowsList() {
   throwCount.textContent = state.throws.length + ' würfe';
   let html = '<div class="throw-item throws-header"><span>#</span><span class="v">Release</span><span class="v">Peak v</span><span class="v">Drift</span><span class="v">Dauer</span></div>';
   state.throws.slice().reverse().forEach(t => {
-    html += `<div class="throw-item">
+    html += `<div class="throw-item clickable" data-throw-n="${t.n}">
       <span class="num">${String(t.n).padStart(2, '0')}</span>
       <span class="v">${t.releaseAngle.toFixed(0)}°</span>
       <span class="v">${(t.peakSpeed / 1000).toFixed(2)}k</span>
@@ -978,6 +1124,157 @@ function updateThrowsList() {
     </div>`;
   });
   throwsList.innerHTML = html;
+  throwsList.querySelectorAll('.throw-item.clickable').forEach(el => {
+    el.addEventListener('click', () => {
+      const n = parseInt(el.dataset.throwN, 10);
+      const thr = state.throws.find(x => x.n === n);
+      if (thr) showThrowDetail(thr);
+    });
+  });
+}
+
+// ====== THROW DETAIL VIEW ======
+const throwDetail = document.getElementById('throwDetail');
+const detailClose = document.getElementById('detailClose');
+const trajCanvas = document.getElementById('trajCanvas');
+const trajCtx = trajCanvas.getContext('2d');
+
+function showThrowDetail(thr) {
+  state.selectedThrow = thr;
+  document.getElementById('detailTitle').textContent = 'Wurf #' + String(thr.n).padStart(2, '0');
+  document.getElementById('detailRelease').textContent = thr.releaseAngle.toFixed(0);
+  document.getElementById('detailSpeed').textContent = (thr.peakSpeed / 1000).toFixed(2);
+  document.getElementById('detailDrift').textContent = thr.elbowDrift.toFixed(1);
+  document.getElementById('detailDuration').textContent = thr.duration.toFixed(2);
+  throwDetail.classList.add('show');
+  drawTrajectory(thr);
+}
+
+function hideThrowDetail() {
+  throwDetail.classList.remove('show');
+  state.selectedThrow = null;
+}
+
+detailClose.addEventListener('click', hideThrowDetail);
+throwDetail.addEventListener('click', (e) => { if (e.target === throwDetail) hideThrowDetail(); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && state.selectedThrow) hideThrowDetail(); });
+
+function drawTrajectory(thr) {
+  const w = trajCanvas.width, h = trajCanvas.height;
+  trajCtx.clearRect(0, 0, w, h);
+
+  // Compute bounding box across all joints in the trajectory
+  const pts = [];
+  thr.trajectory.forEach(f => { pts.push(f.sho, f.elb, f.wri); });
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  pts.forEach(p => {
+    if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
+    if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y;
+  });
+  // Pad and preserve aspect ratio
+  const pad = 30;
+  const bw = (maxX - minX) || 0.1, bh = (maxY - minY) || 0.1;
+  const scale = Math.min((w - pad * 2) / bw, (h - pad * 2) / bh);
+  const cx = (w - bw * scale) / 2, cy = (h - bh * scale) / 2;
+  const px = p => cx + (p.x - minX) * scale;
+  const py = p => cy + (p.y - minY) * scale;
+
+  // Background grid
+  trajCtx.strokeStyle = 'rgba(244,240,232,0.06)';
+  trajCtx.lineWidth = 1;
+  for (let i = 0; i <= 6; i++) {
+    const x = (w / 6) * i;
+    trajCtx.beginPath(); trajCtx.moveTo(x, 0); trajCtx.lineTo(x, h); trajCtx.stroke();
+    const y = (h / 4) * i;
+    trajCtx.beginPath(); trajCtx.moveTo(0, y); trajCtx.lineTo(w, y); trajCtx.stroke();
+  }
+
+  const N = thr.trajectory.length;
+
+  // Wrist path — gradient from dim → accent
+  trajCtx.lineWidth = 3;
+  for (let i = 1; i < N; i++) {
+    const a = thr.trajectory[i - 1].wri, b = thr.trajectory[i].wri;
+    const t = i / N;
+    trajCtx.strokeStyle = `rgba(230,57,70,${0.25 + t * 0.75})`;
+    trajCtx.beginPath();
+    trajCtx.moveTo(px(a), py(a));
+    trajCtx.lineTo(px(b), py(b));
+    trajCtx.stroke();
+  }
+  // Elbow path — softer orange
+  trajCtx.lineWidth = 2;
+  for (let i = 1; i < N; i++) {
+    const a = thr.trajectory[i - 1].elb, b = thr.trajectory[i].elb;
+    const t = i / N;
+    trajCtx.strokeStyle = `rgba(244,162,97,${0.2 + t * 0.7})`;
+    trajCtx.beginPath();
+    trajCtx.moveTo(px(a), py(a));
+    trajCtx.lineTo(px(b), py(b));
+    trajCtx.stroke();
+  }
+  // Shoulder path — dim
+  trajCtx.lineWidth = 1.5;
+  trajCtx.strokeStyle = 'rgba(244,240,232,0.35)';
+  trajCtx.beginPath();
+  thr.trajectory.forEach((f, i) => {
+    if (i === 0) trajCtx.moveTo(px(f.sho), py(f.sho));
+    else trajCtx.lineTo(px(f.sho), py(f.sho));
+  });
+  trajCtx.stroke();
+
+  // Skeleton snapshot at release frame
+  const rel = thr.trajectory[thr.releaseIdx];
+  if (rel) {
+    trajCtx.strokeStyle = 'rgba(244,240,232,0.5)';
+    trajCtx.lineWidth = 2;
+    trajCtx.beginPath();
+    trajCtx.moveTo(px(rel.sho), py(rel.sho));
+    trajCtx.lineTo(px(rel.elb), py(rel.elb));
+    trajCtx.lineTo(px(rel.wri), py(rel.wri));
+    trajCtx.stroke();
+
+    // Joint markers at release
+    const drawJoint = (p, color, r, shape) => {
+      trajCtx.fillStyle = color;
+      trajCtx.beginPath();
+      if (shape === 'triangle') {
+        trajCtx.moveTo(px(p), py(p) - r);
+        trajCtx.lineTo(px(p) + r, py(p) + r);
+        trajCtx.lineTo(px(p) - r, py(p) + r);
+        trajCtx.closePath();
+      } else {
+        trajCtx.arc(px(p), py(p), r, 0, Math.PI * 2);
+      }
+      trajCtx.fill();
+      if (shape === 'ring') {
+        trajCtx.strokeStyle = color;
+        trajCtx.lineWidth = 2;
+        trajCtx.stroke();
+      }
+    };
+    drawJoint(rel.sho, '#f4f0e8', 4, 'circle');
+    drawJoint(rel.elb, '#f4a261', 5, 'circle');
+    drawJoint(rel.wri, '#e63946', 7, 'triangle');
+
+    // Release label
+    trajCtx.fillStyle = '#e63946';
+    trajCtx.font = '11px JetBrains Mono';
+    trajCtx.fillText('RELEASE ' + rel.elbAng.toFixed(0) + '°', px(rel.wri) + 12, py(rel.wri) - 8);
+  }
+
+  // Start marker
+  const first = thr.trajectory[0];
+  if (first) {
+    trajCtx.strokeStyle = 'rgba(244,240,232,0.6)';
+    trajCtx.lineWidth = 1.5;
+    trajCtx.beginPath();
+    trajCtx.arc(px(first.wri), py(first.wri), 6, 0, Math.PI * 2);
+    trajCtx.stroke();
+    trajCtx.fillStyle = 'rgba(244,240,232,0.6)';
+    trajCtx.font = '10px JetBrains Mono';
+    trajCtx.fillText('START', px(first.wri) + 10, py(first.wri) + 4);
+  }
 }
 
 function updateMetrics() {
@@ -1050,6 +1347,8 @@ btnReset.addEventListener('click', () => {
   state.throws = [];
   state.frames = [];
   state.angleHistory = [];
+  state.lastThrowEnd = 0;
+  hideThrowDetail();
   updateThrowsList();
   document.getElementById('elbowDrift').textContent = '—';
   document.getElementById('releaseAngle').textContent = '—';
