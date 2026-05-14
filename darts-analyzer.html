@@ -79,6 +79,7 @@
     gap: 20px;
   }
   @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
+  .main { display: flex; flex-direction: column; gap: 20px; }
 
   .panel {
     background: var(--bg-2);
@@ -480,7 +481,7 @@
 <div class="app">
   <header>
     <div>
-      <div class="tag">Pose Kinematics // v0.8</div>
+      <div class="tag">Pose Kinematics // v0.9</div>
       <h1 class="brand">OCHE<span>.</span></h1>
       <div class="tag" style="margin-top:4px">Darts motion lab — seitliche analyse</div>
     </div>
@@ -491,7 +492,8 @@
   </header>
 
   <div class="layout">
-    <!-- LEFT: video + controls -->
+    <!-- LEFT: video + comparison grid + diagnose -->
+    <div class="main">
     <div class="panel">
       <div class="panel-head">
         <span><span class="idx">01</span> // Capture</span>
@@ -523,6 +525,24 @@
         <div class="side-select" style="margin-left:auto">
           <button id="btnRight" class="active">Rechtshänder</button>
           <button id="btnLeft">Linkshänder</button>
+        </div>
+      </div>
+    </div>
+
+      <div class="panel">
+        <div class="panel-head"><span><span class="idx">05</span> // Wurf-Vergleich</span><span class="tag" style="font-size:9px">Klick für detail</span></div>
+        <div class="throw-grid" id="throwGrid">
+          <div class="throw-grid-empty">Trajektorien aller würfe erscheinen hier nebeneinander.</div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <span><span class="idx">06</span> // Diagnose-Log</span>
+          <span><button id="btnClearLog" style="padding:4px 10px;font-size:9px">Leeren</button></span>
+        </div>
+        <div id="diagLog" style="max-height:240px;overflow-y:auto;padding:8px 14px;font-size:11px;line-height:1.5;font-family:'JetBrains Mono',monospace;color:var(--ink-dim)">
+          <div style="opacity:0.5">Detection-Events erscheinen hier (Phasenwechsel, akzeptierte/abgelehnte Würfe mit Grund)…</div>
         </div>
       </div>
     </div>
@@ -573,12 +593,6 @@
         </div>
       </div>
 
-      <div class="panel">
-        <div class="panel-head"><span><span class="idx">05</span> // Wurf-Vergleich</span><span class="tag" style="font-size:9px">Klick für detail</span></div>
-        <div class="throw-grid" id="throwGrid">
-          <div class="throw-grid-empty">Trajektorien aller würfe erscheinen hier nebeneinander.</div>
-        </div>
-      </div>
     </div>
   </div>
 
@@ -966,6 +980,38 @@ const MIN_FWD_TRAVEL = 0.2;
 const MIN_ELBOW_DELTA = 12;
 const MIN_RELEASE_ANGLE = 100;
 
+// ====== DIAGNOSE LOG ======
+const diagLog = document.getElementById('diagLog');
+const btnClearLog = document.getElementById('btnClearLog');
+const MAX_LOG = 80;
+let logSession = performance.now();
+
+function logEvent(type, msg, color) {
+  const t = ((performance.now() - logSession) / 1000).toFixed(2);
+  const line = `[${t.padStart(6,' ')}s] ${type.padEnd(10, ' ')} ${msg}`;
+  console.log('[OCHE]', line);
+  if (!diagLog) return;
+  // Clear placeholder on first event
+  if (diagLog.firstElementChild && diagLog.firstElementChild.style.opacity === '0.5') {
+    diagLog.innerHTML = '';
+  }
+  const div = document.createElement('div');
+  div.style.whiteSpace = 'pre';
+  div.style.color = color || 'inherit';
+  div.textContent = line;
+  diagLog.appendChild(div);
+  while (diagLog.children.length > MAX_LOG) diagLog.removeChild(diagLog.firstChild);
+  diagLog.scrollTop = diagLog.scrollHeight;
+}
+
+if (btnClearLog) {
+  btnClearLog.addEventListener('click', () => {
+    diagLog.innerHTML = '';
+    logSession = performance.now();
+    logEvent('reset', 'log cleared');
+  });
+}
+
 function detectPhase(now, elbAng, speed) {
   const avgSpeed = mean(state.speedHistory);
   const prev = state.phase;
@@ -986,6 +1032,7 @@ function detectPhase(now, elbAng, speed) {
       state._throwStart = state.frames.length - 1;
       state._peakSpeed = speed;
       state._peakIdx = state.frames.length - 1;
+      logEvent('FORWARD', `start · torso=${torso.toFixed(0)}px · avgSpeed=${avgSpeed.toFixed(0)}px/s (>${riseThresh.toFixed(0)}) · elb=${elbAng.toFixed(0)}°`);
     }
   } else if (state.phase === 'forward') {
     if (speed > state._peakSpeed) {
@@ -1003,18 +1050,25 @@ function detectPhase(now, elbAng, speed) {
       // Elbow must actually extend during the throw — filters static-arm noise spikes
       const dAng = segStart && segPeak ? Math.abs(segPeak.elbAng - segStart.elbAng) : 0;
       const releaseAng = segPeak ? segPeak.elbAng : 0;
-      if (duration < MIN_THROW_MS || dx < MIN_FWD_TRAVEL || dAng < MIN_ELBOW_DELTA || releaseAng < MIN_RELEASE_ANGLE) {
-        // Rejection: brief anti-retrigger only — must not consume the cooldown budget
-        // reserved for spacing between *real* releases, or we'd swallow the next throw.
+      const peakTLPS = (state._peakSpeed / torso).toFixed(1);
+      const reasons = [];
+      if (duration < MIN_THROW_MS) reasons.push(`dur=${duration.toFixed(0)}ms<${MIN_THROW_MS}`);
+      if (dx < MIN_FWD_TRAVEL) reasons.push(`dx=${dx.toFixed(2)}t<${MIN_FWD_TRAVEL}`);
+      if (dAng < MIN_ELBOW_DELTA) reasons.push(`Δelb=${dAng.toFixed(0)}°<${MIN_ELBOW_DELTA}`);
+      if (releaseAng < MIN_RELEASE_ANGLE) reasons.push(`elb=${releaseAng.toFixed(0)}°<${MIN_RELEASE_ANGLE}`);
+      if (reasons.length) {
         state.phase = 'idle';
         state.lastThrowEnd = now - (COOLDOWN_MS - REJECT_COOLDOWN_MS);
+        logEvent('REJECT', `peak=${peakTLPS}t/s · ${reasons.join(' · ')}`, '#e63946');
       } else {
         state.phase = 'release';
         state.phaseSince = now;
         state.lastThrowEnd = now;
+        logEvent('ACCEPT', `#${state.throws.length + 1} · release=${releaseAng.toFixed(0)}° · peak=${peakTLPS}t/s · Δelb=${dAng.toFixed(0)}° · dx=${dx.toFixed(2)}t · dur=${duration.toFixed(0)}ms`, '#06d6a0');
         finalizeThrow();
       }
     } else if (now - state.phaseSince > 2500) {
+      logEvent('TIMEOUT', `forward >2500ms, peak only ${(state._peakSpeed / torso).toFixed(1)}t/s (need ${REL.SPEED_PEAK})`, '#ffd166');
       state.phase = 'idle';
     }
   } else if (state.phase === 'release') {
@@ -1478,11 +1532,14 @@ function toggleRecord() {
     btnRecord.textContent = '■ Aufnahme stoppen';
     btnRecord.classList.add('live');
     showToast('Aufnahme läuft — wirf jetzt');
+    logSession = performance.now();
+    logEvent('REC', 'aufnahme gestartet · gates: peak≥' + REL.SPEED_PEAK + 't/s · Δelb≥' + MIN_ELBOW_DELTA + '° · dx≥' + MIN_FWD_TRAVEL + 't · dur≥' + MIN_THROW_MS + 'ms · elb≥' + MIN_RELEASE_ANGLE + '°');
   } else {
     btnRecord.textContent = '● Aufnahme';
     btnRecord.classList.remove('live');
     phaseBanner.classList.remove('show');
     showToast('Aufnahme gestoppt');
+    logEvent('REC', 'aufnahme gestoppt · ' + state.throws.length + ' würfe akzeptiert');
   }
 }
 btnReset.addEventListener('click', () => {
