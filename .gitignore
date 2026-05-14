@@ -20,3 +20,6 @@ build/
 .cache/
 .env
 .env.local
+
+# Session export files (can be multi-MB, attach to PRs instead of committing)
+oche-session-*.json
