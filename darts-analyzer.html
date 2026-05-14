@@ -481,7 +481,7 @@
 <div class="app">
   <header>
     <div>
-      <div class="tag">Pose Kinematics // v1.4</div>
+      <div class="tag">Pose Kinematics // v1.5</div>
       <h1 class="brand">OCHE<span>.</span></h1>
       <div class="tag" style="margin-top:4px">Darts motion lab — seitliche analyse</div>
     </div>
@@ -1142,37 +1142,48 @@ function updatePhaseBanner(phase) {
 }
 
 function finalizeThrow() {
-  // The forward state often triggers during cocking, so the raw segment includes
-  // backswing + forward swing. Trim to the actual forward swing by starting at the
-  // deepest-cock frame (min elbow angle) between throwStart and the release peak.
   const rawStart = Math.max(0, state._throwStart);
-  const peakIdx = state._peakIdx;
-  const end = Math.min(state.frames.length - 1, peakIdx + 3);
-  if (end <= rawStart + 2) return; // too short
+  const speedPeakIdx = state._peakIdx;
 
-  let start = rawStart;
-  let minElb = Infinity;
-  for (let i = rawStart; i <= peakIdx; i++) {
-    if (state.frames[i].elbAng < minElb) {
-      minElb = state.frames[i].elbAng;
-      start = i;
+  // The speed-peak frame is typically *before* max arm extension — the wrist accelerates,
+  // peaks mid-swing, then decelerates while elbow keeps extending until release. Use the
+  // max-elbow frame in the forward window as the actual release moment for display.
+  const searchEnd = Math.min(state.frames.length - 1, speedPeakIdx + 5);
+  let releaseIdx = speedPeakIdx;
+  let maxElb = state.frames[speedPeakIdx].elbAng;
+  for (let i = rawStart; i <= searchEnd; i++) {
+    if (state.frames[i].elbAng > maxElb) {
+      maxElb = state.frames[i].elbAng;
+      releaseIdx = i;
     }
   }
 
-  const segment = state.frames.slice(start, end + 1);
-  // Release frame ≈ peakIdx (peak wrist speed correlates with release moment in darts)
-  const releaseFrame = state.frames[peakIdx];
+  // Cock frame = min elbow before release (start of forward swing)
+  let cockIdx = rawStart;
+  let minElb = Infinity;
+  for (let i = rawStart; i <= releaseIdx; i++) {
+    if (state.frames[i].elbAng < minElb) {
+      minElb = state.frames[i].elbAng;
+      cockIdx = i;
+    }
+  }
+
+  const end = Math.min(state.frames.length - 1, releaseIdx + 3);
+  if (end <= cockIdx + 2) return;
+
+  const segment = state.frames.slice(cockIdx, end + 1);
+  const releaseFrame = state.frames[releaseIdx];
   const releaseAngle = releaseFrame.elbAng;
   const peakSpeed = state._peakSpeed;
 
-  // Elbow drift: how much did elbow position (in normalized coords → pixels) move
-  // during the active part of the throw? Lower = more stable.
+  // Elbow drift: position variance over the forward swing. In good technique the elbow
+  // acts as a pivot (low drift). Arm-swing throws have higher drift.
   const elbPositions = segment.map(f => ({ x: f.elb.x * overlay.width, y: f.elb.y * overlay.height }));
   const ex = mean(elbPositions.map(p => p.x));
   const ey = mean(elbPositions.map(p => p.y));
   const elbowDrift = Math.sqrt(mean(elbPositions.map(p => (p.x - ex) ** 2 + (p.y - ey) ** 2)));
 
-  const duration = (releaseFrame.t - state.frames[start].t) / 1000;
+  const duration = (releaseFrame.t - state.frames[cockIdx].t) / 1000;
 
   // Snapshot trajectory: normalized joint coords + elbow angle per frame in the throw segment.
   // Stored as plain values (not landmark refs) so it survives later mutations.
@@ -1184,7 +1195,7 @@ function finalizeThrow() {
     elbAng: f.elbAng,
     speed: f.speed,
   }));
-  const releaseIdxInSeg = Math.min(trajectory.length - 1, peakIdx - start);
+  const releaseIdxInSeg = Math.min(trajectory.length - 1, releaseIdx - cockIdx);
 
   const throwData = {
     n: state.throws.length + 1,
