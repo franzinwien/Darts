@@ -481,7 +481,7 @@
 <div class="app">
   <header>
     <div>
-      <div class="tag" id="versionTag">Pose Kinematics // v1.6</div>
+      <div class="tag" id="versionTag">Pose Kinematics // v1.7</div>
       <h1 class="brand">OCHE<span>.</span></h1>
       <div class="tag" style="margin-top:4px">Darts motion lab — seitliche analyse</div>
     </div>
@@ -662,7 +662,7 @@
 <script type="module">
 import { PoseLandmarker, FilesetResolver, DrawingUtils } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
 
-const APP_VERSION = 'v1.6';
+const APP_VERSION = 'v1.7';
 
 // ====== STATE ======
 const state = {
@@ -1047,10 +1047,10 @@ function logEvent(type, msg, color) {
 
 if (btnClearLog) {
   btnClearLog.addEventListener('click', () => {
+    // Clear the on-screen log only — keep state.detectionEvents intact so the
+    // session export always contains the full event history.
     diagLog.innerHTML = '';
-    logSession = performance.now();
-    state.detectionEvents = [];
-    logEvent('reset', 'log cleared');
+    logEvent('reset', 'on-screen log cleared (export hat weiterhin alle events)');
   });
 }
 
@@ -1287,8 +1287,10 @@ function detectPhase(now, elbAng, speed) {
         state.phase = 'release';
         state.phaseSince = now;
         state.lastThrowEnd = now;
-        logEvent('ACCEPT', `#${state.throws.length + 1} · release=${releaseAng.toFixed(0)}° · peak=${peakTLPS}t/s · Δelb=${dAng.toFixed(0)}° · travel=${dTrav.toFixed(2)}t · dur=${duration.toFixed(0)}ms`, '#06d6a0');
-        finalizeThrow();
+        const stored = finalizeThrow();
+        if (stored) {
+          logEvent('ACCEPT', `#${stored.n} · release=${stored.releaseAngle.toFixed(0)}° · peak=${peakTLPS}t/s · Δelb=${dAng.toFixed(0)}° · travel=${dTrav.toFixed(2)}t · dur=${duration.toFixed(0)}ms`, '#06d6a0');
+        }
       }
     } else if (now - state.phaseSince > 2500) {
       const elbAtPeak = state.frames[state._peakIdx] ? state.frames[state._peakIdx].elbAng.toFixed(0) : '—';
@@ -1324,21 +1326,19 @@ function updatePhaseBanner(phase) {
 function finalizeThrow() {
   const rawStart = Math.max(0, state._throwStart);
   const speedPeakIdx = state._peakIdx;
+  const lastIdx = state.frames.length - 1;
 
-  // The speed-peak frame is typically *before* max arm extension — the wrist accelerates,
-  // peaks mid-swing, then decelerates while elbow keeps extending until release. Use the
-  // max-elbow frame in the forward window as the actual release moment for display.
-  const searchEnd = Math.min(state.frames.length - 1, speedPeakIdx + 5);
+  // Find max-elbow frame across the *whole* forward segment, not just peakIdx+5.
+  // The wrist-speed peak is often early in the forward swing; max extension comes later.
   let releaseIdx = speedPeakIdx;
   let maxElb = state.frames[speedPeakIdx].elbAng;
-  for (let i = rawStart; i <= searchEnd; i++) {
+  for (let i = rawStart; i <= lastIdx; i++) {
     if (state.frames[i].elbAng > maxElb) {
       maxElb = state.frames[i].elbAng;
       releaseIdx = i;
     }
   }
 
-  // Cock frame = min elbow before release (start of forward swing)
   let cockIdx = rawStart;
   let minElb = Infinity;
   for (let i = rawStart; i <= releaseIdx; i++) {
@@ -1348,8 +1348,19 @@ function finalizeThrow() {
     }
   }
 
-  const end = Math.min(state.frames.length - 1, releaseIdx + 3);
-  if (end <= cockIdx + 2) return;
+  // Ensure a meaningful trajectory window. If trim collapsed the segment (release
+  // frame happens to coincide with cock frame, or both at rawStart), fall back to
+  // the full forward segment so we never end up with a degenerate 0-duration throw.
+  if (releaseIdx - cockIdx < 3) {
+    cockIdx = rawStart;
+    releaseIdx = Math.min(lastIdx, Math.max(speedPeakIdx, rawStart + 3));
+  }
+
+  const end = Math.min(lastIdx, releaseIdx + 3);
+  if (end - cockIdx < 3) {
+    logEvent('DROP', `finalize: segment zu kurz (${end - cockIdx + 1} frames) · raw=${rawStart} cock=${cockIdx} release=${releaseIdx} end=${end}`, '#e63946');
+    return null;
+  }
 
   const segment = state.frames.slice(cockIdx, end + 1);
   const releaseFrame = state.frames[releaseIdx];
@@ -1393,6 +1404,7 @@ function finalizeThrow() {
   updateThrowGrid();
   updateMetrics();
   showToast(`Wurf #${throwData.n} erfasst — ${releaseAngle.toFixed(0)}°`);
+  return throwData;
 }
 
 // ====== DRAWING ======
@@ -1775,6 +1787,8 @@ function toggleRecord() {
     state.frames = [];
     state.phase = 'idle';
     state.speedHistory = [];
+    state.detectionEvents = [];
+    diagLog.innerHTML = '';
     btnRecord.textContent = '■ Aufnahme stoppen';
     btnRecord.classList.add('live');
     showToast('Aufnahme läuft — wirf jetzt');
