@@ -481,7 +481,7 @@
 <div class="app">
   <header>
     <div>
-      <div class="tag">Pose Kinematics // v1.0</div>
+      <div class="tag">Pose Kinematics // v1.1</div>
       <h1 class="brand">OCHE<span>.</span></h1>
       <div class="tag" style="margin-top:4px">Darts motion lab — seitliche analyse</div>
     </div>
@@ -989,8 +989,8 @@ const REL = {
   SPEED_PEAK: 2.8,   // minimum required peak (torso-lengths/s) for a valid throw
 };
 const COOLDOWN_MS = 400;
-const REJECT_COOLDOWN_MS = 200;
-const MIN_THROW_MS = 150;
+const REJECT_COOLDOWN_MS = 100;
+const MIN_THROW_MS = 80;
 const MIN_TRAVEL = 0.2;          // wrist Euclidean travel (start→peak) in torso lengths
 const MIN_ELBOW_DELTA = 12;
 const MIN_RELEASE_ANGLE = 100;
@@ -1063,6 +1063,23 @@ function detectPhase(now, elbAng, speed) {
       state._peakIdx = state.frames.length - 1;
     }
     if (state._peakSpeed > peakThresh && avgSpeed < state._peakSpeed * 0.45) {
+      // Smart peak selection: a dart throw has two speed peaks — backswing apex (arm cocked,
+      // low elbow angle) and the actual release (arm extended). Re-scan the segment to find
+      // the highest-speed frame where the elbow is already in release range. This locks onto
+      // the real release moment and ignores the backswing peak.
+      let smartIdx = -1, smartSpd = 0;
+      for (let i = state._throwStart; i < state.frames.length; i++) {
+        const f = state.frames[i];
+        if (f.elbAng >= MIN_RELEASE_ANGLE && f.speed > smartSpd) {
+          smartSpd = f.speed;
+          smartIdx = i;
+        }
+      }
+      const usedSmart = smartIdx >= 0 && smartIdx !== state._peakIdx;
+      if (smartIdx >= 0) {
+        state._peakIdx = smartIdx;
+        state._peakSpeed = smartSpd;
+      }
       const duration = now - state.phaseSince;
       // Validate: long enough + actual forward travel of the wrist (in image x)
       const segStart = state.frames[state._throwStart];
@@ -1084,15 +1101,16 @@ function detectPhase(now, elbAng, speed) {
       if (dTrav < MIN_TRAVEL) reasons.push(`travel=${dTrav.toFixed(2)}t<${MIN_TRAVEL}`);
       if (dAng < MIN_ELBOW_DELTA) reasons.push(`Δelb=${dAng.toFixed(0)}°<${MIN_ELBOW_DELTA}`);
       if (releaseAng < MIN_RELEASE_ANGLE) reasons.push(`elb=${releaseAng.toFixed(0)}°<${MIN_RELEASE_ANGLE}`);
+      const smartTag = usedSmart ? ' · smart-peak' : '';
       if (reasons.length) {
         state.phase = 'idle';
         state.lastThrowEnd = now - (COOLDOWN_MS - REJECT_COOLDOWN_MS);
-        logEvent('REJECT', `peak=${peakTLPS}t/s · ${reasons.join(' · ')}`, '#e63946');
+        logEvent('REJECT', `peak=${peakTLPS}t/s · ${reasons.join(' · ')}${smartTag}`, '#e63946');
       } else {
         state.phase = 'release';
         state.phaseSince = now;
         state.lastThrowEnd = now;
-        logEvent('ACCEPT', `#${state.throws.length + 1} · release=${releaseAng.toFixed(0)}° · peak=${peakTLPS}t/s · Δelb=${dAng.toFixed(0)}° · travel=${dTrav.toFixed(2)}t · dur=${duration.toFixed(0)}ms`, '#06d6a0');
+        logEvent('ACCEPT', `#${state.throws.length + 1} · release=${releaseAng.toFixed(0)}° · peak=${peakTLPS}t/s · Δelb=${dAng.toFixed(0)}° · travel=${dTrav.toFixed(2)}t · dur=${duration.toFixed(0)}ms${smartTag}`, '#06d6a0');
         finalizeThrow();
       }
     } else if (now - state.phaseSince > 2500) {
