@@ -481,7 +481,7 @@
 <div class="app">
   <header>
     <div>
-      <div class="tag">Pose Kinematics // v1.2</div>
+      <div class="tag">Pose Kinematics // v1.3</div>
       <h1 class="brand">OCHE<span>.</span></h1>
       <div class="tag" style="margin-top:4px">Darts motion lab — seitliche analyse</div>
     </div>
@@ -1075,8 +1075,11 @@ function detectPhase(now, elbAng, speed) {
           smartIdx = i;
         }
       }
-      const usedSmart = smartIdx >= 0 && smartIdx !== state._peakIdx;
-      if (smartIdx >= 0) {
+      const usedSmart = smartIdx >= 0 && smartIdx !== state._peakIdx && smartSpd > peakThresh;
+      if (smartIdx >= 0 && smartSpd > peakThresh) {
+        // Smart-peak only overrides if it also passes the speed threshold —
+        // otherwise we'd accept slow non-throw motions just because they happened
+        // to have an extended elbow at some frame.
         state._peakIdx = smartIdx;
         state._peakSpeed = smartSpd;
       }
@@ -1144,11 +1147,22 @@ function updatePhaseBanner(phase) {
 }
 
 function finalizeThrow() {
-  // Use frames from throw start to peak + a few frames after
-  const start = Math.max(0, state._throwStart);
+  // The forward state often triggers during cocking, so the raw segment includes
+  // backswing + forward swing. Trim to the actual forward swing by starting at the
+  // deepest-cock frame (min elbow angle) between throwStart and the release peak.
+  const rawStart = Math.max(0, state._throwStart);
   const peakIdx = state._peakIdx;
   const end = Math.min(state.frames.length - 1, peakIdx + 3);
-  if (end <= start + 2) return; // too short
+  if (end <= rawStart + 2) return; // too short
+
+  let start = rawStart;
+  let minElb = Infinity;
+  for (let i = rawStart; i <= peakIdx; i++) {
+    if (state.frames[i].elbAng < minElb) {
+      minElb = state.frames[i].elbAng;
+      start = i;
+    }
+  }
 
   const segment = state.frames.slice(start, end + 1);
   // Release frame ≈ peakIdx (peak wrist speed correlates with release moment in darts)
