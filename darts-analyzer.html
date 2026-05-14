@@ -480,7 +480,7 @@
 <div class="app">
   <header>
     <div>
-      <div class="tag">Pose Kinematics // v0.7</div>
+      <div class="tag">Pose Kinematics // v0.8</div>
       <h1 class="brand">OCHE<span>.</span></h1>
       <div class="tag" style="margin-top:4px">Darts motion lab — seitliche analyse</div>
     </div>
@@ -525,19 +525,6 @@
           <button id="btnLeft">Linkshänder</button>
         </div>
       </div>
-      <details>
-        <summary>So funktioniert's</summary>
-        <div class="help">
-          <ol>
-            <li><strong>Setup:</strong> Handy/Webcam <em>seitlich</em> auf Wurfarm-Seite, ca. 2-3m Abstand, Höhe Brust. Ganzer Arm + Schulter müssen im Bild sein.</li>
-            <li><strong>Kalibrierung:</strong> Wähle Rechts-/Linkshänder. App trackt automatisch Schulter, Ellbogen, Handgelenk.</li>
-            <li><strong>Wurf:</strong> Klick <em>Aufnahme</em> und wirf normal. App erkennt Wurfphasen (Backswing → Forward → Release) automatisch.</li>
-            <li><strong>Analyse:</strong> Nach jedem Wurf werden Ellbogen-Stabilität, Release-Winkel, Hand-Geschwindigkeit und Wurf-zu-Wurf-Konsistenz berechnet.</li>
-            <li><strong>Tipp:</strong> Aufnahme-Modus läuft kontinuierlich — wirf mehrere Pfeile hintereinander für Konsistenz-Score.</li>
-            <li><strong>Detail:</strong> Klick auf einen Wurf im Log öffnet die Trajektorie mit markiertem Release-Punkt.</li>
-          </ol>
-        </div>
-      </details>
     </div>
 
     <!-- RIGHT: metrics -->
@@ -593,6 +580,22 @@
         </div>
       </div>
     </div>
+  </div>
+
+  <div class="panel">
+    <details>
+      <summary>So funktioniert's</summary>
+      <div class="help">
+        <ol>
+          <li><strong>Setup:</strong> Handy/Webcam <em>seitlich</em> auf Wurfarm-Seite, ca. 2-3m Abstand, Höhe Brust. Ganzer Arm + Schulter müssen im Bild sein.</li>
+          <li><strong>Kalibrierung:</strong> Wähle Rechts-/Linkshänder. App trackt automatisch Schulter, Ellbogen, Handgelenk.</li>
+          <li><strong>Wurf:</strong> Klick <em>Aufnahme</em> und wirf normal. App erkennt Wurfphasen (Backswing → Forward → Release) automatisch.</li>
+          <li><strong>Analyse:</strong> Nach jedem Wurf werden Ellbogen-Stabilität, Release-Winkel, Hand-Geschwindigkeit und Wurf-zu-Wurf-Konsistenz berechnet.</li>
+          <li><strong>Tipp:</strong> Aufnahme-Modus läuft kontinuierlich — wirf mehrere Pfeile hintereinander für Konsistenz-Score.</li>
+          <li><strong>Detail:</strong> Klick auf einen Wurf im Log oder auf eine Karte im Vergleich öffnet die Trajektorie mit markiertem Release-Punkt.</li>
+        </ol>
+      </div>
+    </details>
   </div>
 
   <div class="footer">
@@ -956,11 +959,12 @@ const REL = {
   SPEED_RISE: 1.5,
   SPEED_PEAK: 3.5,   // minimum required peak (torso-lengths/s) for a valid throw
 };
-const COOLDOWN_MS = 600;
+const COOLDOWN_MS = 400;
+const REJECT_COOLDOWN_MS = 200;  // brief anti-retrigger after a rejected throw, not full cooldown
 const MIN_THROW_MS = 150;
-const MIN_FWD_TRAVEL = 0.3;
-const MIN_ELBOW_DELTA = 15;
-const MIN_RELEASE_ANGLE = 100;  // elbow must be reasonably extended at the speed peak
+const MIN_FWD_TRAVEL = 0.2;
+const MIN_ELBOW_DELTA = 12;
+const MIN_RELEASE_ANGLE = 100;
 
 function detectPhase(now, elbAng, speed) {
   const avgSpeed = mean(state.speedHistory);
@@ -1000,9 +1004,10 @@ function detectPhase(now, elbAng, speed) {
       const dAng = segStart && segPeak ? Math.abs(segPeak.elbAng - segStart.elbAng) : 0;
       const releaseAng = segPeak ? segPeak.elbAng : 0;
       if (duration < MIN_THROW_MS || dx < MIN_FWD_TRAVEL || dAng < MIN_ELBOW_DELTA || releaseAng < MIN_RELEASE_ANGLE) {
-        // false positive — discard and cool down briefly
+        // Rejection: brief anti-retrigger only — must not consume the cooldown budget
+        // reserved for spacing between *real* releases, or we'd swallow the next throw.
         state.phase = 'idle';
-        state.lastThrowEnd = now;
+        state.lastThrowEnd = now - (COOLDOWN_MS - REJECT_COOLDOWN_MS);
       } else {
         state.phase = 'release';
         state.phaseSince = now;
