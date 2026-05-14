@@ -481,7 +481,7 @@
 <div class="app">
   <header>
     <div>
-      <div class="tag">Pose Kinematics // v0.9</div>
+      <div class="tag">Pose Kinematics // v1.0</div>
       <h1 class="brand">OCHE<span>.</span></h1>
       <div class="tag" style="margin-top:4px">Darts motion lab — seitliche analyse</div>
     </div>
@@ -914,7 +914,22 @@ function processPose(result, now) {
     }
   }
   if (scaleSample && scaleSample > 20) {
-    state.torso = state.torso ? state.torso * 0.85 + scaleSample * 0.15 : scaleSample;
+    if (!state.torso) {
+      // Bootstrap: take median of first 5 samples so a single bad initial frame
+      // doesn't anchor the whole session's thresholds.
+      state._torsoInit = state._torsoInit || [];
+      state._torsoInit.push(scaleSample);
+      if (state._torsoInit.length >= 5) {
+        const sorted = state._torsoInit.slice().sort((a, b) => a - b);
+        state.torso = sorted[Math.floor(sorted.length / 2)];
+        state._torsoInit = null;
+      }
+    } else {
+      // Reject single-frame outliers: clamp delta to ±50% of current scale before smoothing.
+      const maxDelta = state.torso * 0.5;
+      const clamped = Math.max(state.torso - maxDelta, Math.min(state.torso + maxDelta, scaleSample));
+      state.torso = state.torso * 0.85 + clamped * 0.15;
+    }
   }
 
   // Elbow angle (sho-elb-wri)
@@ -971,14 +986,15 @@ function processPose(result, now) {
 const REL = {
   SPEED_LOW:  0.4,
   SPEED_RISE: 1.5,
-  SPEED_PEAK: 3.5,   // minimum required peak (torso-lengths/s) for a valid throw
+  SPEED_PEAK: 2.8,   // minimum required peak (torso-lengths/s) for a valid throw
 };
 const COOLDOWN_MS = 400;
-const REJECT_COOLDOWN_MS = 200;  // brief anti-retrigger after a rejected throw, not full cooldown
+const REJECT_COOLDOWN_MS = 200;
 const MIN_THROW_MS = 150;
-const MIN_FWD_TRAVEL = 0.2;
+const MIN_TRAVEL = 0.2;          // wrist Euclidean travel (start→peak) in torso lengths
 const MIN_ELBOW_DELTA = 12;
 const MIN_RELEASE_ANGLE = 100;
+const MAX_ENTRY_ANGLE = 130;     // forward only starts when arm is cocked (elb < this)
 
 // ====== DIAGNOSE LOG ======
 const diagLog = document.getElementById('diagLog');
@@ -1027,12 +1043,19 @@ function detectPhase(now, elbAng, speed) {
       return;
     }
     if (avgSpeed > riseThresh) {
-      state.phase = 'forward';
-      state.phaseSince = now;
-      state._throwStart = state.frames.length - 1;
-      state._peakSpeed = speed;
-      state._peakIdx = state.frames.length - 1;
-      logEvent('FORWARD', `start · torso=${torso.toFixed(0)}px · avgSpeed=${avgSpeed.toFixed(0)}px/s (>${riseThresh.toFixed(0)}) · elb=${elbAng.toFixed(0)}°`);
+      if (elbAng >= MAX_ENTRY_ANGLE) {
+        // Arm already straight — not a backswing-to-release motion, likely follow-through.
+        // Don't enter forward, but apply brief anti-retrigger so we don't spam this log.
+        state.lastThrowEnd = now - (COOLDOWN_MS - REJECT_COOLDOWN_MS);
+        logEvent('SKIP', `arm gestreckt · elb=${elbAng.toFixed(0)}°≥${MAX_ENTRY_ANGLE} · avgSpeed=${avgSpeed.toFixed(0)}px/s`, '#ffd166');
+      } else {
+        state.phase = 'forward';
+        state.phaseSince = now;
+        state._throwStart = state.frames.length - 1;
+        state._peakSpeed = speed;
+        state._peakIdx = state.frames.length - 1;
+        logEvent('FORWARD', `start · torso=${torso.toFixed(0)}px · avgSpeed=${avgSpeed.toFixed(0)}px/s (>${riseThresh.toFixed(0)}) · elb=${elbAng.toFixed(0)}°`);
+      }
     }
   } else if (state.phase === 'forward') {
     if (speed > state._peakSpeed) {
@@ -1044,8 +1067,13 @@ function detectPhase(now, elbAng, speed) {
       // Validate: long enough + actual forward travel of the wrist (in image x)
       const segStart = state.frames[state._throwStart];
       const segPeak = state.frames[state._peakIdx];
-      const dx = segStart && segPeak
-        ? Math.abs((segPeak.wri.x - segStart.wri.x) * overlay.width) / torso
+      // Euclidean wrist travel from start of forward phase to peak frame —
+      // handles throws with any orientation (not just horizontal motion).
+      const dTrav = segStart && segPeak
+        ? Math.hypot(
+            (segPeak.wri.x - segStart.wri.x) * overlay.width,
+            (segPeak.wri.y - segStart.wri.y) * overlay.height
+          ) / torso
         : 0;
       // Elbow must actually extend during the throw — filters static-arm noise spikes
       const dAng = segStart && segPeak ? Math.abs(segPeak.elbAng - segStart.elbAng) : 0;
@@ -1053,7 +1081,7 @@ function detectPhase(now, elbAng, speed) {
       const peakTLPS = (state._peakSpeed / torso).toFixed(1);
       const reasons = [];
       if (duration < MIN_THROW_MS) reasons.push(`dur=${duration.toFixed(0)}ms<${MIN_THROW_MS}`);
-      if (dx < MIN_FWD_TRAVEL) reasons.push(`dx=${dx.toFixed(2)}t<${MIN_FWD_TRAVEL}`);
+      if (dTrav < MIN_TRAVEL) reasons.push(`travel=${dTrav.toFixed(2)}t<${MIN_TRAVEL}`);
       if (dAng < MIN_ELBOW_DELTA) reasons.push(`Δelb=${dAng.toFixed(0)}°<${MIN_ELBOW_DELTA}`);
       if (releaseAng < MIN_RELEASE_ANGLE) reasons.push(`elb=${releaseAng.toFixed(0)}°<${MIN_RELEASE_ANGLE}`);
       if (reasons.length) {
@@ -1064,7 +1092,7 @@ function detectPhase(now, elbAng, speed) {
         state.phase = 'release';
         state.phaseSince = now;
         state.lastThrowEnd = now;
-        logEvent('ACCEPT', `#${state.throws.length + 1} · release=${releaseAng.toFixed(0)}° · peak=${peakTLPS}t/s · Δelb=${dAng.toFixed(0)}° · dx=${dx.toFixed(2)}t · dur=${duration.toFixed(0)}ms`, '#06d6a0');
+        logEvent('ACCEPT', `#${state.throws.length + 1} · release=${releaseAng.toFixed(0)}° · peak=${peakTLPS}t/s · Δelb=${dAng.toFixed(0)}° · travel=${dTrav.toFixed(2)}t · dur=${duration.toFixed(0)}ms`, '#06d6a0');
         finalizeThrow();
       }
     } else if (now - state.phaseSince > 2500) {
@@ -1533,7 +1561,7 @@ function toggleRecord() {
     btnRecord.classList.add('live');
     showToast('Aufnahme läuft — wirf jetzt');
     logSession = performance.now();
-    logEvent('REC', 'aufnahme gestartet · gates: peak≥' + REL.SPEED_PEAK + 't/s · Δelb≥' + MIN_ELBOW_DELTA + '° · dx≥' + MIN_FWD_TRAVEL + 't · dur≥' + MIN_THROW_MS + 'ms · elb≥' + MIN_RELEASE_ANGLE + '°');
+    logEvent('REC', 'aufnahme gestartet · gates: peak≥' + REL.SPEED_PEAK + 't/s · Δelb≥' + MIN_ELBOW_DELTA + '° · travel≥' + MIN_TRAVEL + 't · dur≥' + MIN_THROW_MS + 'ms · elb≥' + MIN_RELEASE_ANGLE + '° · entry<' + MAX_ENTRY_ANGLE + '°');
   } else {
     btnRecord.textContent = '● Aufnahme';
     btnRecord.classList.remove('live');
